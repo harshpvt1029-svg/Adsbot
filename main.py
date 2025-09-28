@@ -1,34 +1,63 @@
 import os
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from db import db, ping_db
+from pymongo.mongo_client import MongoClient
 
 # -----------------------------
-# 🔹 Bot Configuration
+# 🔹 Environment Variables
 # -----------------------------
-API_ID = 24945402  # your API_ID
-API_HASH = "6118e50f5dc4e3a955e50b22cf673ae2"  # your API_HASH
-BOT_TOKEN = "8388938837:AAFLBd4BHMUnbwelsqcXbsjtuz6t7-nTZoc"  # your BotFather token
-OWNER_ID = 123456789  # replace with your numeric Telegram ID
-FORCE_CHANNEL = "@CosmicAdsPro"
-FORCE_GROUP = "@Cosmicadsgroup"
-PREMIUM_LINK = "https://your-premium-link.com"
-ADMINS = ["King_bst34", "Sherrbst", "LordHarsh"]
-LOGS_CHAT_ID = "@your_logs_channel"  # optional logs bot/channel
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+FORCE_CHANNEL = os.getenv("FORCE_CHANNEL")
+FORCE_GROUP = os.getenv("FORCE_GROUP")
+ADMINS = [int(x) for x in os.getenv("ADMINS").split(",")]
+LOGS_CHAT_ID = os.getenv("LOGS_CHAT_ID")
+PREMIUM_LINK = os.getenv("PREMIUM_LINK")
+MONGO_URI = os.getenv("MONGO_URI")
+
+# Auto-premium users (owner + admins)
+PREMIUM_USERS = [OWNER_ID] + ADMINS
 
 # -----------------------------
-# 🔹 Create Bot Client
+# 🔹 MongoDB Setup
+# -----------------------------
+client = MongoClient(MONGO_URI)
+db = client.get_database()  # defaults to URI database (cosmic_ads)
+
+def ping_db():
+    try:
+        client.admin.command('ping')
+        print("✅ Connected to MongoDB!")
+    except Exception as e:
+        print("❌ MongoDB connection failed:", e)
+
+ping_db()
+
+# -----------------------------
+# 🔹 Bot Setup
 # -----------------------------
 bot = Client("cosmic_bot",
              api_id=API_ID,
              api_hash=API_HASH,
              bot_token=BOT_TOKEN)
 
-# Ping MongoDB on start
-ping_db()
+# -----------------------------
+# 🔹 Helper Functions
+# -----------------------------
+def is_premium(user_id):
+    return user_id in PREMIUM_USERS or db.premium.find_one({"user_id": user_id, "approved": True})
+
+async def send_logs(text):
+    try:
+        await bot.send_message(LOGS_CHAT_ID, text)
+    except:
+        pass
 
 # -----------------------------
-# 🔹 Start Command
+# 🔹 /start Command
 # -----------------------------
 @bot.on_message(filters.command("start") & filters.private)
 async def start(_, message):
@@ -42,7 +71,7 @@ async def start(_, message):
         )
         return
 
-    # Privacy Policy (simple text)
+    # Privacy Policy
     privacy_button = InlineKeyboardMarkup(
         [[InlineKeyboardButton("I have read", callback_data="privacy_accept")]]
     )
@@ -56,7 +85,6 @@ async def start(_, message):
 # -----------------------------
 @bot.on_callback_query(filters.regex("privacy_accept"))
 async def privacy_accept(_, callback_query):
-    # Show Dashboard
     dashboard_buttons = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Add Accounts", callback_data="add_accounts")],
@@ -75,11 +103,12 @@ async def privacy_accept(_, callback_query):
     )
 
 # -----------------------------
-# 🔹 Dashboard Button Callbacks (Skeleton)
+# 🔹 Dashboard Button Callbacks
 # -----------------------------
 @bot.on_callback_query()
 async def dashboard_callbacks(_, query):
     data = query.data
+    user_id = query.from_user.id
 
     if data == "add_accounts":
         await query.answer("🟢 Feature: Add Accounts (coming soon)", show_alert=True)
@@ -94,9 +123,23 @@ async def dashboard_callbacks(_, query):
     elif data == "add_groups":
         await query.answer("🟢 Feature: Add Groups (coming soon)", show_alert=True)
     elif data == "support":
-        await query.answer("🟢 Contact Admins: " + ", ".join(ADMINS), show_alert=True)
+        support_text = f"Admins: @LordHarsh, @King_bst34, @Sherrbst"
+        await query.answer(support_text, show_alert=True)
     else:
         await query.answer("❌ Unknown action", show_alert=True)
+
+# -----------------------------
+# 🔹 Premium Approval Command
+# -----------------------------
+@bot.on_message(filters.command("approve") & filters.user(OWNER_ID))
+async def approve(_, message):
+    try:
+        username = message.text.split()[1].replace("@", "")
+        db.premium.update_one({"username": username}, {"$set": {"approved": True}}, upsert=True)
+        await message.reply(f"✅ @{username} has been approved for Premium!")
+        await send_logs(f"✅ @{username} approved by owner/admin {message.from_user.first_name}")
+    except IndexError:
+        await message.reply("❌ Usage: /approve <username>")
 
 # -----------------------------
 # 🔹 Run Bot
