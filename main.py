@@ -1,8 +1,9 @@
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid, PhoneCodeExpired, FloodWait
+from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid, PhoneCodeExpired
 from pyrogram.enums import ChatType, ChatMemberStatus
-import asyncio, time, os
+import asyncio, os, time
+from pymongo import MongoClient
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -13,11 +14,12 @@ ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",")]
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL")
 FORCE_GROUP = os.getenv("FORCE_GROUP")
 BOT_USERNAME = os.getenv("BOT_USERNAME")
-MIN_INTERVAL = 300  # 5 minutes minimum interval
-DASHBOARD_BANNER = "https://i.postimg.cc/qv7fcQXb/a-logo-design-featuring-the-text-lord-ad-0sfrm-JKJTea-DLQfz82-X-Q-Sd-Clrr-URTS22-Yyz6rn-8-g.jpg"
+MONGO_URI = os.getenv("MONGO_URI")
+MIN_INTERVAL = int(os.getenv("MIN_INTERVAL", "300"))
 
-# ---------------- INIT ----------------
-bot = Client("ad_bot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
+# ---------------- DATABASE ----------------
+client_db = MongoClient(MONGO_URI)
+db = client_db.get_database()  # Default DB from URI
 
 # ---------------- STATE ----------------
 listen_states = {}
@@ -30,9 +32,12 @@ premium_users = set()
 ad_tasks = {}            # user_id: asyncio task
 user_groups = {}         # user_id: {account_index: [group_ids]}
 user_warnings = {}       # user_id: warning count
-keyword_auto_reply = {}  # user_id: { keyword: reply }
+auto_replies = {}        # user_id: {keyword: reply_text}
 
-# ---------------- MEMBERSHIP ----------------
+# ---------------- BOT ----------------
+bot = Client("ad_bot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
+
+# ---------------- MEMBERSHIP CHECK ----------------
 async def check_membership(user_id):
     try:
         ch = await bot.get_chat_member(FORCE_CHANNEL, user_id)
@@ -43,17 +48,17 @@ async def check_membership(user_id):
     except:
         return False
 
-# ---------------- DASHBOARD ----------------
+# ---------------- DASHBOARD BUTTONS ----------------
 def dashboard_buttons():
     buttons = [
-        [InlineKeyboardButton("➕ Add Accounts", callback_data="add_accounts"),
-         InlineKeyboardButton("👤 My Accounts", callback_data="my_accounts")],
-        [InlineKeyboardButton("✏️ Set Ad Message", callback_data="set_ad")],
-        [InlineKeyboardButton("⏱️ Set Time Intervals", callback_data="set_time"),
-         InlineKeyboardButton("▶️ Start/Stop Ad", callback_data="ad_control")],
-        [InlineKeyboardButton("📂 Add Groups", callback_data="add_groups")],
-        [InlineKeyboardButton("💎 Premium", callback_data="premium"),
-         InlineKeyboardButton("🛠 Support", url="https://t.me/NeoHarsh")]
+        [InlineKeyboardButton("Add Accounts", callback_data="add_accounts"),
+         InlineKeyboardButton("My Accounts", callback_data="my_accounts")],
+        [InlineKeyboardButton("Set Ad Message", callback_data="set_ad")],
+        [InlineKeyboardButton("Set Time Intervals", callback_data="set_time"),
+         InlineKeyboardButton("Start/Stop Ad", callback_data="ad_control")],
+        [InlineKeyboardButton("Add Groups", callback_data="add_groups")],
+        [InlineKeyboardButton("Premium", callback_data="premium"),
+         InlineKeyboardButton("Support", url="https://t.me/NeoHarsh")]
     ]
     return InlineKeyboardMarkup(buttons)
 
@@ -67,19 +72,19 @@ def otp_keypad(current=""):
         [InlineKeyboardButton("9", callback_data="otp_9"), InlineKeyboardButton("0", callback_data="otp_0")],
         [InlineKeyboardButton("🔙 Back", callback_data="otp_back"), InlineKeyboardButton("✅ OK", callback_data="otp_ok")]
     ]
-    caption = f"📝 Enter the OTP code:\n\n`{current}`\n\nUse the keypad below:"
+    caption = f"📩 Enter the OTP code:\n\n`{current}`\n\nUse the keypad below:"
     return InlineKeyboardMarkup(buttons), caption
 
-# ---------------- /START ----------------
+# ---------------- /START COMMAND ----------------
 @bot.on_message(filters.command("start"))
 async def start(_, message):
     user_id = message.from_user.id
     if not await check_membership(user_id):
-        await message.reply(f"⚠️ Please join the channel {FORCE_CHANNEL} and group {FORCE_GROUP} to use the bot.")
+        await message.reply(f"Please join the channel {FORCE_CHANNEL} and group {FORCE_GROUP} to use the bot.")
         return
     await bot.send_photo(
         chat_id=user_id,
-        photo=DASHBOARD_BANNER,
+        photo="https://i.postimg.cc/qv7fcQXb/a-logo-design-featuring-the-text-lord-ad-0sfrm-JKJTea-DLQfz82-X-Q-Sd-Clrr-URTS22-Yyz6rn-8-g.jpg",
         caption="✅ Welcome to Ad Bot Dashboard!\nChoose an option below:",
         reply_markup=dashboard_buttons()
     )
@@ -88,7 +93,7 @@ async def start(_, message):
 @bot.on_callback_query(filters.regex("add_accounts"))
 async def add_account(_, query: CallbackQuery):
     user_id = query.from_user.id
-    await query.message.reply("📞 Enter your phone number with country code (e.g., +1234567890):\n\nNote: We are not storing your data.")
+    await query.message.reply("📱 Enter your phone number with country code (e.g., +1234567890):")
     listen_states[user_id] = "waiting_phone"
 
 # ---------------- HANDLE OTP ----------------
@@ -98,6 +103,7 @@ async def handle_otp(_, query: CallbackQuery):
     data = query.data
     if user_id not in otp_inputs:
         otp_inputs[user_id] = ""
+
     if data.startswith("otp_") and data not in ["otp_back", "otp_ok"]:
         otp_inputs[user_id] += data[4:]
     elif data=="otp_back":
@@ -144,6 +150,7 @@ async def handle_otp(_, query: CallbackQuery):
             await query.answer(f"❌ Login failed: {e}", show_alert=True)
             otp_inputs[user_id]=""
         return
+
     keyboard, caption = otp_keypad(otp_inputs[user_id])
     try:
         await query.message.edit_text(caption, reply_markup=keyboard)
@@ -155,6 +162,8 @@ async def handle_otp(_, query: CallbackQuery):
 async def handle_text(_, message):
     user_id = message.from_user.id
     text = message.text.strip()
+
+    # Phone input
     if listen_states.get(user_id)=="waiting_phone":
         try:
             session_name = f"session_{user_id}_{int(time.time())}"
@@ -171,6 +180,8 @@ async def handle_text(_, message):
         except Exception as e:
             await message.reply(f"❌ Error sending OTP: {e}")
         return
+
+    # 2FA password
     if listen_states.get(user_id)=="waiting_2fa":
         if user_id not in user_temp_clients:
             await message.reply("❌ Session not found. Start again.")
@@ -194,10 +205,14 @@ async def handle_text(_, message):
             await message.reply(f"❌ 2FA failed: {e}")
             user_temp_clients.pop(user_id,None)
             listen_states.pop(user_id,None)
+
+    # Ad message
     if listen_states.get(user_id)=="waiting_ad":
         user_ad_message[user_id] = text
         await message.reply("✅ Ad message set successfully!")
         listen_states.pop(user_id,None)
+
+    # Time interval
     if listen_states.get(user_id)=="waiting_time":
         try:
             interval = int(text)
@@ -209,27 +224,40 @@ async def handle_text(_, message):
             listen_states.pop(user_id,None)
         except ValueError:
             await message.reply("❌ Please enter a valid number.")
-
-# ---------------- DASHBOARD CALLBACKS ----------------
+            # ---------------- DASHBOARD CALLBACKS ----------------
 @bot.on_callback_query()
 async def dashboard_cb(_, query: CallbackQuery):
     user_id = query.from_user.id
     data = query.data
+
+    # My accounts
     if data=="my_accounts":
         accounts=user_accounts.get(user_id,[])
-        await query.message.reply(f"👤 You have {len(accounts)} account(s) added." if accounts else "❌ No accounts added yet.")
+        if accounts:
+            msg_text = f"📋 You have {len(accounts)} account(s):\n"
+            for idx, acc in enumerate(accounts, start=1):
+                msg_text += f"{idx}. {acc.get('first_name')} (@{acc.get('username')})\n"
+            await query.message.reply(msg_text)
+        else:
+            await query.message.reply("❌ No accounts added yet.")
+
+    # Set ad
     elif data=="set_ad":
-        await query.message.reply("✏️ Send me the ad message (do not abuse):")
+        await query.message.reply("✏️ Send me the ad message:")
         listen_states[user_id]="waiting_ad"
+
+    # Set interval
     elif data=="set_time":
         await query.message.reply(f"⏱ Send interval in seconds (minimum {MIN_INTERVAL}):")
         listen_states[user_id]="waiting_time"
+
+    # Add groups
     elif data=="add_groups":
         accounts=user_accounts.get(user_id,[])
         if not accounts:
             await query.message.reply("❌ Add accounts first.")
             return
-        msg=await query.message.reply("🔄 Reloading groups...")
+        msg=await query.message.reply("🔄 Reloading your groups...")
         account_groups_map={}
         total_groups=0
         for idx, acc_info in enumerate(accounts):
@@ -255,6 +283,8 @@ async def dashboard_cb(_, query: CallbackQuery):
             await msg.edit_text(f"✅ {total_groups} groups reloaded across {len(accounts)} account(s)!")
         else:
             await msg.edit_text("❌ No groups found in any account.")
+
+    # Start/Stop ad
     elif data=="ad_control":
         if user_id in ad_tasks:
             ad_tasks[user_id].cancel()
@@ -265,18 +295,20 @@ async def dashboard_cb(_, query: CallbackQuery):
             groups_map=user_groups.get(user_id,{})
             ad_msg=user_ad_message.get(user_id)
             if not accounts or not groups_map or not ad_msg:
-                await query.message.reply("❌ Add accounts, groups and ad message first.")
+                await query.message.reply("❌ Add accounts, groups, and ad message first.")
                 return
             interval=user_time_interval.get(user_id,MIN_INTERVAL)
             task=asyncio.create_task(send_ads(user_id, interval, ad_msg))
             ad_tasks[user_id]=task
             await query.message.reply(f"▶️ Ad sending started every {interval} seconds.")
+
+    # Premium
     elif data=="premium":
         if user_id in premium_users:
-            await query.message.reply("💎 You are already premium!")
+            await query.message.reply("⭐ You are already premium!")
         else:
-            for admin in ADMINS:
-                await bot.send_message(admin,f"💰 Premium request from user: {user_id}")
+            for admin_id in ADMINS:
+                await bot.send_message(admin_id,f"💎 Premium request from user: {user_id}")
             await query.message.reply("✅ Your request has been sent to admin.")
 
 # ---------------- SEND ADS ----------------
@@ -298,8 +330,20 @@ async def send_ads(user_id, interval, message_text):
         except asyncio.CancelledError:
             break
 
+# ---------------- AUTO REPLY ----------------
+@bot.on_message(filters.group)
+async def auto_reply(_, message):
+    user_id = message.chat.id
+    for uid, keywords in auto_replies.items():
+        for keyword, reply_text in keywords.items():
+            if keyword.lower() in message.text.lower():
+                try:
+                    await message.reply(reply_text)
+                except Exception as e:
+                    print(f"❌ Auto-reply error: {e}")
+
 # ---------------- ADMIN COMMANDS ----------------
-@bot.on_message(filters.command("approve") & filters.user(ADMINS))
+@bot.on_message(filters.command("approve") & filters.user(OWNER_ID))
 async def approve(_, message):
     try:
         parts=message.text.split()
@@ -316,12 +360,12 @@ async def approve(_, message):
     except Exception as e:
         await message.reply(f"❌ Error: {e}")
 
-@bot.on_message(filters.command("allusers") & filters.user(ADMINS))
+@bot.on_message(filters.command("allusers") & filters.user(OWNER_ID))
 async def all_users(_, message):
     if not user_accounts:
         await message.reply("❌ No users have added accounts yet.")
         return
-    msg_text = "👥 All Users and their accounts:\n\n"
+    msg_text = "📋 All Users and their accounts:\n\n"
     for uid, accounts in user_accounts.items():
         msg_text += f"User ID: {uid}\n"
         for idx, acc_info in enumerate(accounts, start=1):
@@ -330,16 +374,6 @@ async def all_users(_, message):
             msg_text += f"   {idx}. {first_name} (@{username})\n"
         msg_text += "\n"
     await message.reply(msg_text)
-
-# ---------------- AUTO REPLY ----------------
-@bot.on_message(filters.text)
-async def auto_reply(_, message):
-    user_id = message.from_user.id
-    replies = keyword_auto_reply.get(user_id, {})
-    for keyword, reply in replies.items():
-        if keyword.lower() in message.text.lower():
-            await message.reply(reply)
-            break
 
 # ---------------- RUN BOT ----------------
 bot.run()
