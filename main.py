@@ -1,148 +1,121 @@
 import os
-import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo.mongo_client import MongoClient
+from pymongo import MongoClient
+import logging
+from flask import Flask
+from threading import Thread
 
-# -----------------------------
-# 🔹 Environment Variables
-# -----------------------------
+# ================= LOGGING =================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ================= ENVIRONMENT VARS =================
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
-FORCE_CHANNEL = os.getenv("FORCE_CHANNEL")
-FORCE_GROUP = os.getenv("FORCE_GROUP")
-ADMINS = [int(x) for x in os.getenv("ADMINS").split(",")]
-LOGS_CHAT_ID = os.getenv("LOGS_CHAT_ID")
-PREMIUM_LINK = os.getenv("PREMIUM_LINK")
+ADMINS = [int(x) for x in os.getenv("ADMINS", "").split()] if os.getenv("ADMINS") else []
 MONGO_URI = os.getenv("MONGO_URI")
 
-# Auto-premium users (owner + admins)
-PREMIUM_USERS = [OWNER_ID] + ADMINS
+# ================= MONGO DB =================
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["bot_db"]
+users_col = db["users"]
 
-# -----------------------------
-# 🔹 MongoDB Setup
-# -----------------------------
-client = MongoClient(MONGO_URI)
-db = client.get_database()  # defaults to URI database (cosmic_ads)
+# ================= FLASK KEEP-ALIVE =================
+app = Flask('')
 
-def ping_db():
-    try:
-        client.admin.command('ping')
-        print("✅ Connected to MongoDB!")
-    except Exception as e:
-        print("❌ MongoDB connection failed:", e)
+@app.route('/')
+def home():
+    return "Bot is running safely ✅"
 
-ping_db()
+def run():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-# -----------------------------
-# 🔹 Bot Setup
-# -----------------------------
-bot = Client("cosmic_bot",
-             api_id=API_ID,
-             api_hash=API_HASH,
-             bot_token=BOT_TOKEN)
+Thread(target=run).start()
 
-# -----------------------------
-# 🔹 Helper Functions
-# -----------------------------
-def is_premium(user_id):
-    return user_id in PREMIUM_USERS or db.premium.find_one({"user_id": user_id, "approved": True})
+# ================= BOT CLIENT =================
+bot = Client(
+    "cosmic_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-async def send_logs(text):
-    try:
-        await bot.send_message(LOGS_CHAT_ID, text)
-    except:
-        pass
+# ================= START =================
+@bot.on_message(filters.command("start"))
+async def start(client, message):
+    user = {"id": message.from_user.id, "name": message.from_user.first_name}
+    users_col.update_one({"id": user["id"]}, {"$set": user}, upsert=True)
 
-# -----------------------------
-# 🔹 /start Command
-# -----------------------------
-@bot.on_message(filters.command("start") & filters.private)
-async def start(_, message):
-    # Force join check
-    try:
-        await bot.get_chat_member(FORCE_CHANNEL, message.from_user.id)
-        await bot.get_chat_member(FORCE_GROUP, message.from_user.id)
-    except:
-        await message.reply(
-            f"❌ Please join {FORCE_CHANNEL} and {FORCE_GROUP} first to use the bot!"
-        )
-        return
-
-    # Privacy Policy
-    privacy_button = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("I have read", callback_data="privacy_accept")]]
-    )
-    await message.reply(
-        "📄 Please read our privacy policy: https://gist.github.com/harshpvt1029-svg/504fba01171ef14c81f9f7143f5349c5#file-privacy-policy",
-        reply_markup=privacy_button
-    )
-
-# -----------------------------
-# 🔹 Privacy Accept Callback
-# -----------------------------
-@bot.on_callback_query(filters.regex("privacy_accept"))
-async def privacy_accept(_, callback_query):
-    dashboard_buttons = InlineKeyboardMarkup(
+    keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Add Accounts", callback_data="add_accounts")],
-            [InlineKeyboardButton("My Accounts", callback_data="my_accounts"),
-             InlineKeyboardButton("Set Ad Message", callback_data="set_ad")],
-            [InlineKeyboardButton("Set Time Intervals", callback_data="set_time"),
-             InlineKeyboardButton("Start/Stop Ad", callback_data="start_stop")],
-            [InlineKeyboardButton("Add Groups", callback_data="add_groups")],
-            [InlineKeyboardButton("Premium", url=PREMIUM_LINK),
-             InlineKeyboardButton("Support", callback_data="support")]
+            [InlineKeyboardButton("➕ Add Account", callback_data="add_account")],
+            [InlineKeyboardButton("💬 Add Message", callback_data="add_message")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+            [InlineKeyboardButton("📜 Privacy Policy", callback_data="privacy")],
+            [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard")]
         ]
     )
-    await callback_query.message.edit_text(
-        "✅ Dashboard ready! Select an option below:",
-        reply_markup=dashboard_buttons
+    await message.reply_text(
+        f"👋 Hello {message.from_user.first_name}!\n\n"
+        "Welcome to **Cosmic Bot** 🚀\n\n"
+        "Choose an option below 👇",
+        reply_markup=keyboard
     )
 
-# -----------------------------
-# 🔹 Dashboard Button Callbacks
-# -----------------------------
+# ================= CALLBACK HANDLERS =================
 @bot.on_callback_query()
-async def dashboard_callbacks(_, query):
-    data = query.data
-    user_id = query.from_user.id
+async def callbacks(client, callback_query):
+    data = callback_query.data
 
-    if data == "add_accounts":
-        await query.answer("🟢 Feature: Add Accounts (coming soon)", show_alert=True)
-    elif data == "my_accounts":
-        await query.answer("🟢 Feature: My Accounts (coming soon)", show_alert=True)
-    elif data == "set_ad":
-        await query.answer("🟢 Feature: Set Ad Message (coming soon)", show_alert=True)
-    elif data == "set_time":
-        await query.answer("🟢 Feature: Set Time Intervals (coming soon)", show_alert=True)
-    elif data == "start_stop":
-        await query.answer("🟢 Feature: Start/Stop Ad (coming soon)", show_alert=True)
-    elif data == "add_groups":
-        await query.answer("🟢 Feature: Add Groups (coming soon)", show_alert=True)
-    elif data == "support":
-        support_text = f"Admins: @LordHarsh, @King_bst34, @Sherrbst"
-        await query.answer(support_text, show_alert=True)
+    if data == "add_account":
+        await callback_query.message.edit_text(
+            "➕ **Add Account Tutorial**:\n\n"
+            "1️⃣ Enter your account details.\n"
+            "2️⃣ Confirm safely.\n\n"
+            "⚠️ *Note*: We are **not storing your data** 🔒"
+        )
+
+    elif data == "add_message":
+        await callback_query.message.edit_text(
+            "💬 **Add Message Tutorial**:\n\n"
+            "1️⃣ Type your message.\n"
+            "2️⃣ Set when it should be sent.\n\n"
+            "⚠️ *Note*: Please **do not abuse** ❌"
+        )
+
+    elif data == "settings":
+        await callback_query.message.edit_text(
+            "⚙️ **Settings Tutorial**:\n\n"
+            "1️⃣ Manage your keywords.\n"
+            "2️⃣ Customize replies.\n\n"
+            "✨ You’re in full control!"
+        )
+
+    elif data == "privacy":
+        await callback_query.message.edit_text(
+            "📜 **Privacy Policy**:\n\n"
+            "We respect your privacy 🛡️\n"
+            "✅ We do **not store personal data**.\n"
+            "✅ Only necessary details are saved securely.\n"
+            "✅ Abuse or spam will not be tolerated."
+        )
+
+    elif data == "dashboard":
+        await callback_query.message.edit_text(
+            "📊 **Dashboard Tutorial**:\n\n"
+            "1️⃣ Track your accounts.\n"
+            "2️⃣ See your message stats.\n"
+            "3️⃣ Manage everything in one place.\n\n"
+            "🚀 Coming with more features soon!"
+        )
+
     else:
-        await query.answer("❌ Unknown action", show_alert=True)
+        await callback_query.message.edit_text("❌ Unknown action.")
 
-# -----------------------------
-# 🔹 Premium Approval Command
-# -----------------------------
-@bot.on_message(filters.command("approve") & filters.user(OWNER_ID))
-async def approve(_, message):
-    try:
-        username = message.text.split()[1].replace("@", "")
-        db.premium.update_one({"username": username}, {"$set": {"approved": True}}, upsert=True)
-        await message.reply(f"✅ @{username} has been approved for Premium!")
-        await send_logs(f"✅ @{username} approved by owner/admin {message.from_user.first_name}")
-    except IndexError:
-        await message.reply("❌ Usage: /approve <username>")
-
-# -----------------------------
-# 🔹 Run Bot
-# -----------------------------
-print("🚀 Bot is starting...")
-bot.run()
+# ================= RUN =================
+if __name__ == "__main__":
+    logger.info("🤖 Cosmic Bot is starting...")
+    bot.run()
