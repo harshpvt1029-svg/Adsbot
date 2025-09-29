@@ -21,10 +21,11 @@ PRIVACY_LINK = os.getenv("PRIVACY_LINK")
 # MongoDB Connection
 # ====================
 client_db = MongoClient(MONGO_URI)
-db = client_db.get_database()
+db_name = "cosmic_ads"  # default database
+db = client_db.get_database(db_name)
 try:
     client_db.admin.command("ping")
-    print("✅ Connected to MongoDB!")
+    print(f"✅ Connected to MongoDB! Using database: {db_name}")
 except Exception as e:
     print("❌ MongoDB connection failed:", e)
 
